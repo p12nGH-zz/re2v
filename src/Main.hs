@@ -64,28 +64,31 @@ eq = BinaryOp (Cmp Equal)
 not' = UnaryOp Not
 neq s r = not' $ eq s r
 
-toHW :: Signal -> QRe -> ReHW Signal
-toHW prev (QRe (Exact c) (QExact 1 1)) = do
+singleCharMatch :: (Signal -> Signal) -> Quantifier -> Signal -> ReHW Signal
+singleCharMatch match (QExact 1 1) prev = do
     s <- ask
-    let cond = and' [prev, eq s $ charL c]
+    let cond = and' [prev, match s]
     lift $ mkReg [(cond, Lit 1 1), (not' cond, Lit 0 1)]
 
-toHW prev (QRe (Exact c) (QAtLeast 0)) = do
+singleCharMatch match (QAtLeast 0) prev = do
     r <- mfix $ \r -> do
         s <- ask
-        let cond = and' [or' [prev, r], eq s $ charL c]
+        let cond = and' [or' [prev, r], match s]
         lift $ mkReg [(cond, Lit 1 1), (not' cond, Lit 0 1)]
     return $ or' [prev, r]
 
-toHW prev (QRe (Exact c) (QAtLeast n)) = do 
+singleCharMatch match (QAtLeast n) prev = do 
     cnt <- mfix $ \cnt -> do
         s <- ask
         let
-            go = and' [eq cnt 0, prev, eq s $ charL c]
-            continue = and' [neq cnt 0, eq s $ charL c]
-            stop = and' [neq cnt 0, eq s $ charL c]
+            go = and' [eq cnt 0, prev, match s]
+            continue = and' [neq cnt 0, match s]
+            stop = and' [not' $ match s]
         lift $ mkReg [(go, 1), (continue, MultyOp Sum [cnt, 1]), (stop, 0)]
-    return $ BinaryOp (Cmp GreaterOrEqual) cnt $ fromIntegral n
+    lift $ sig $ BinaryOp (Cmp GreaterOrEqual) cnt $ fromIntegral n
+
+toHW (QRe (Exact c) q) = singleCharMatch (eq $ charL c) q
+toHW (QRe Any q) = singleCharMatch (\_ -> Lit 1 1) q -- this case can be optimized
 
 verilog p = toVerilogHW $ runReaderT p (Alias "in" 8)
 
@@ -94,5 +97,6 @@ main = do
     print $ parseOnly re "aa(re.)[^abc-9]|t"
 
     putStrLn $ verilog $ do
-        toHW (Alias "prev" 1) (QRe (Exact 'b') (QAtLeast 7))
+        (toHW (QRe (Exact 'b') (QAtLeast 7))) (Alias "prev" 1)
+        (toHW (QRe Any (QAtLeast 7))) (Alias "prev" 1)
     -- print $ parseOnly captureGrp "(re)"
