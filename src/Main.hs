@@ -32,9 +32,10 @@ classC = Class <$> choice [inverted, not_inverted] <*> content <* "]" where
     content = many1 $ choice [range, single]
 
 -- quantifiers * ? {n,} {n,p}
-quantifier = choice [s, q, atleast, range] where
+quantifier = choice [s, p, q, atleast, range] where
     s = "*" *> (pure $ QAtLeast 0)
-    q = "?" *> (pure $ QAtLeast 1)
+    p = "+" *> (pure $ QAtLeast 1)
+    q = "?" *> (pure $ QExact 0 1)
     atleast = QAtLeast <$> ("{" *> decimal <* ",}")
     range = QExact <$> ("{" *> decimal <* ",") <*> (decimal <* "}")
 
@@ -48,12 +49,12 @@ re1 p = sepBy (many1 c) $ "|" where
 re = re1 "|"
 
 classHWCondition s c inv = inverted inv where
-    inverted True = UnaryOp Not $ MultyOp Or $ map cond c
-    inverted _ = MultyOp Or $ map cond c
-    cond (ExactCE char) = BinaryOp (Cmp Equal) s $ Lit (ord char) 8
-    cond (RangeCE charl charh) = MultyOp And [condh, condl] where
-        condh = BinaryOp (Cmp LessOrEqual) s $ Lit (ord charh) 8
-        condl = BinaryOp (Cmp GreaterOrEqual) s $ Lit (ord charl) 8
+    inverted True = not' $ or' $ map cond c
+    inverted _ = or' $ map cond c
+    cond (ExactCE c) = eq s $ charL c
+    cond (RangeCE charl charh) = and' [condh, condl] where
+        condh = BinaryOp (Cmp LessOrEqual) s $ charL charh
+        condl = BinaryOp (Cmp GreaterOrEqual) s $ charL charl
 
 type ReHW = ReaderT Signal HW
 
@@ -64,20 +65,24 @@ eq = BinaryOp (Cmp Equal)
 not' = UnaryOp Not
 neq s r = not' $ eq s r
 
-singleCharMatch :: (Signal -> Signal) -> Quantifier -> Signal -> ReHW Signal
-singleCharMatch match (QExact 1 1) prev = do
+toHW (QRe (Exact c) q) = singleCharMatch q $ eq $ charL c
+toHW (QRe Any q) = singleCharMatch q $ \_ -> Lit 1 1 -- this case can be optimized
+toHW (QRe (Class i e) q) = singleCharMatch q $ \s -> classHWCondition s e i
+
+singleCharMatch :: Quantifier -> (Signal -> Signal) -> Signal -> ReHW Signal
+singleCharMatch (QExact 1 1) match prev = do
     s <- ask
     let cond = and' [prev, match s]
     lift $ mkReg [(cond, Lit 1 1), (not' cond, Lit 0 1)]
 
-singleCharMatch match (QAtLeast 0) prev = do
+singleCharMatch (QAtLeast 0) match prev = do
     r <- mfix $ \r -> do
         s <- ask
         let cond = and' [or' [prev, r], match s]
         lift $ mkReg [(cond, Lit 1 1), (not' cond, Lit 0 1)]
     return $ or' [prev, r]
 
-singleCharMatch match (QAtLeast n) prev = do 
+singleCharMatch (QAtLeast n) match prev = do 
     cnt <- mfix $ \cnt -> do
         s <- ask
         let
@@ -87,8 +92,26 @@ singleCharMatch match (QAtLeast n) prev = do
         lift $ mkReg [(go, 1), (continue, MultyOp Sum [cnt, 1]), (stop, 0)]
     lift $ sig $ BinaryOp (Cmp GreaterOrEqual) cnt $ fromIntegral n
 
-toHW (QRe (Exact c) q) = singleCharMatch (eq $ charL c) q
-toHW (QRe Any q) = singleCharMatch (\_ -> Lit 1 1) q -- this case can be optimized
+-- loop NFA
+loop :: (Signal -> ReHW Signal) -> Signal -> ReHW Signal
+loop r p = mfix $ \feedback -> r $ or' [feedback, p]
+
+-- chain sequential NFAs
+chain :: [(Signal -> ReHW Signal)] -> Signal -> ReHW (Signal, [Signal]) 
+chain [] p = pure (p, [])
+chain [r] p = do
+    m <- r p
+    return (m, [m])
+chain (r:rs) p = do
+    m <- r p
+    (m', ms) <- chain rs m
+    return (m', m:ms)
+
+--QAtLeast Int | QExact Int Int
+applyQuantifier :: Quantifier -> (Signal -> ReHW Signal) -> Signal -> ReHW Signal
+applyQuantifier (QExact 1 1) r = r
+applyQuantifier (QAtLeast 1) r = loop r 
+
 
 verilog p = toVerilogHW $ runReaderT p (Alias "in" 8)
 
@@ -97,6 +120,5 @@ main = do
     print $ parseOnly re "aa(re.)[^abc-9]|t"
 
     putStrLn $ verilog $ do
-        (toHW (QRe (Exact 'b') (QAtLeast 7))) (Alias "prev" 1)
-        (toHW (QRe Any (QAtLeast 7))) (Alias "prev" 1)
+        (toHW (QRe (Class True [RangeCE 'a' 'z']) (QAtLeast 7))) (Alias "prev" 1)
     -- print $ parseOnly captureGrp "(re)"
