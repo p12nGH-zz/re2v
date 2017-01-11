@@ -8,6 +8,7 @@ import Data.Char (ord)
 import Control.Monad.Trans.Reader
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Fix
+import Control.Monad (forM)
 
 data Re = Exact Char | Class Bool [ClassEntry] | Grp [[QRe]] | Any deriving (Show)
 data QRe = QRe Re Quantifier deriving (Show)
@@ -48,7 +49,7 @@ re1 p = sepBy (many1 c) $ "|" where
     c = choice $ map withQuantifier [escaped, classC, captureGrp, anyC, notThese p]
 re = re1 "|"
 
-classHWCondition s c inv = inverted inv where
+classHWCondition c inv s = inverted inv where
     inverted True = not' $ or' $ map cond c
     inverted _ = or' $ map cond c
     cond (ExactCE c) = eq s $ charL c
@@ -65,32 +66,24 @@ eq = BinaryOp (Cmp Equal)
 not' = UnaryOp Not
 neq s r = not' $ eq s r
 
-toHW (QRe (Exact c) q) = singleCharMatch q $ eq $ charL c
-toHW (QRe Any q) = singleCharMatch q $ \_ -> Lit 1 1 -- this case can be optimized
-toHW (QRe (Class i e) q) = singleCharMatch q $ \s -> classHWCondition s e i
+toHW (Exact c) = singleCharMatch $ eq $ charL c
+toHW Any = singleCharMatch $ \_ -> Lit 1 1 -- this case can be optimized
+toHW (Class i e) = singleCharMatch $ classHWCondition e i
+toHW (Grp m) = toHW' m
 
-singleCharMatch :: Quantifier -> (Signal -> Signal) -> Signal -> ReHW Signal
-singleCharMatch (QExact 1 1) match prev = do
+toHW' :: [[QRe]] -> Signal -> ReHW Signal
+toHW' rs p = do
+    ms <- forM rs $ \s -> do
+        let quantify (QRe r q) = applyQuantifier q (toHW r)
+        (m, _) <- (chain $ map quantify s) p
+        return m
+    return $ or' ms
+
+singleCharMatch :: (Signal -> Signal) -> Signal -> ReHW Signal
+singleCharMatch match prev = do
     s <- ask
     let cond = and' [prev, match s]
     lift $ mkReg [(cond, Lit 1 1), (not' cond, Lit 0 1)]
-
-singleCharMatch (QAtLeast 0) match prev = do
-    r <- mfix $ \r -> do
-        s <- ask
-        let cond = and' [or' [prev, r], match s]
-        lift $ mkReg [(cond, Lit 1 1), (not' cond, Lit 0 1)]
-    return $ or' [prev, r]
-
-singleCharMatch (QAtLeast n) match prev = do 
-    cnt <- mfix $ \cnt -> do
-        s <- ask
-        let
-            go = and' [eq cnt 0, prev, match s]
-            continue = and' [neq cnt 0, match s]
-            stop = and' [not' $ match s]
-        lift $ mkReg [(go, 1), (continue, MultyOp Sum [cnt, 1]), (stop, 0)]
-    lift $ sig $ BinaryOp (Cmp GreaterOrEqual) cnt $ fromIntegral n
 
 -- loop NFA
 loop :: (Signal -> ReHW Signal) -> Signal -> ReHW Signal
@@ -107,18 +100,31 @@ chain (r:rs) p = do
     (m', ms) <- chain rs m
     return (m', m:ms)
 
---QAtLeast Int | QExact Int Int
+--
 applyQuantifier :: Quantifier -> (Signal -> ReHW Signal) -> Signal -> ReHW Signal
-applyQuantifier (QExact 1 1) r = r
-applyQuantifier (QAtLeast 1) r = loop r 
-
+applyQuantifier (QExact 1 1) r p = r p
+applyQuantifier (QAtLeast 1) r p = loop r p
+applyQuantifier (QAtLeast 0) r p = do
+    m <- (loop r) p
+    return $ or' [m, p]
+applyQuantifier (QAtLeast n) r p = do
+    (m, _) <- (chain $ (replicate (n - 1) r) ++ [loop r]) p
+    return m
+applyQuantifier (QExact n h) r p = do
+    (m, _) <- (chain $ replicate (n - 1) r) p
+    (_, ms) <- (chain $ replicate (h - n) r) m
+    return $ or' ms
 
 verilog p = toVerilogHW $ runReaderT p (Alias "in" 8)
 
 main :: IO ()
 main = do
-    print $ parseOnly re "aa(re.)[^abc-9]|t"
-
+    
+    let (Right r) = parseOnly re "aa(re.)[^abc-9]|t"
+    let
+        r1 = Class True [RangeCE 'a' 'z']
+        q1 = QAtLeast 8 
     putStrLn $ verilog $ do
-        (toHW (QRe (Class True [RangeCE 'a' 'z']) (QAtLeast 7))) (Alias "prev" 1)
+        toHW' r (Alias "prev" 1)
+
     -- print $ parseOnly captureGrp "(re)"
