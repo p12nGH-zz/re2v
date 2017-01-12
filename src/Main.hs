@@ -9,11 +9,13 @@ import Control.Monad.Trans.Reader
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Fix
 import Control.Monad (forM)
+import System.Environment (getArgs)
+import System.Exit (exitFailure)
 
 data Re = Exact Char | Class Bool [ClassEntry] | Grp [[QRe]] | Any deriving (Show)
 data QRe = QRe Re Quantifier deriving (Show)
 data ClassEntry = ExactCE Char | RangeCE Char Char deriving (Show)
-data Quantifier = QAtLeast Int | QExact Int Int deriving (Show)
+data Quantifier = QNoMoreThan Int | QAtLeast Int | QExact Int Int deriving (Show)
 
 captureGrp = Grp <$> ("(" *> (re1 ")|") <* ")")
 anyC = "." *> pure Any
@@ -33,12 +35,16 @@ classC = Class <$> choice [inverted, not_inverted] <*> content <* "]" where
     content = many1 $ choice [range, single]
 
 -- quantifiers * ? {n,} {n,p}
-quantifier = choice [s, p, q, atleast, range] where
+quantifier = choice [s, p, q, atleast, nomorethan, range, exactrange] where
     s = "*" *> (pure $ QAtLeast 0)
     p = "+" *> (pure $ QAtLeast 1)
     q = "?" *> (pure $ QExact 0 1)
     atleast = QAtLeast <$> ("{" *> decimal <* ",}")
+    nomorethan = QNoMoreThan <$> ("{," *> decimal <* "}")
     range = QExact <$> ("{" *> decimal <* ",") <*> (decimal <* "}")
+    exactrange = do
+        n <- "{" *> decimal <* "}"
+        return $ QExact n n 
 
 -- try to parse with quantifier, if fails use default {1,1}
 withQuantifier r = QRe <$> r <*> choice [quantifier, (pure $ QExact 1 1)]
@@ -114,17 +120,27 @@ applyQuantifier (QExact n h) r p = do
     (m, _) <- (chain $ replicate (n - 1) r) p
     (_, ms) <- (chain $ replicate (h - n) r) m
     return $ or' ms
+applyQuantifier (QNoMoreThan n) r p = do
+    (_, ms) <- (chain $ replicate n r) p
+    return $ or' (p:ms)
 
-verilog p = toVerilogHW $ runReaderT p (Alias "in" 8)
+verilog p = toVerilogHW $ do
+    runReaderT p (Alias "in" 8) >>= sigalias "match"
 
 main :: IO ()
 main = do
-    
-    let (Right r) = parseOnly re "aa(re.)[^abc-9]|t"
     let
-        r1 = Class True [RangeCE 'a' 'z']
-        q1 = QAtLeast 8 
-    putStrLn $ verilog $ do
-        toHW' r (Alias "prev" 1)
+        regexp2v r = do
+            case parseOnly re r of
+                (Right r) -> do
+                    putStrLn "module re(input clk, input rst_n, input in, output match);" 
+                    putStrLn $ verilog $ toHW' r (Lit 1 1)
+                    putStrLn "endmodule"
+                _ -> do
+                    putStrLn "Cannot parse regular expression."
+                    exitFailure
 
-    -- print $ parseOnly captureGrp "(re)"
+    a <- getArgs
+    case a of
+        (r:[]) -> regexp2v $ pack r
+        _ -> putStrLn "Usage re2v <regular expression>. For example: re2v 'aa(re.)[^abc-9]|t'" >> exitFailure 
