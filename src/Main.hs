@@ -117,9 +117,9 @@ applyQuantifier (QAtLeast n) r p = do
     (m, _) <- (chain $ (replicate (n - 1) r) ++ [loop r]) p
     return m
 applyQuantifier (QExact n h) r p = do
-    (m, _) <- (chain $ replicate (n - 1) r) p
+    (m, _) <- (chain $ replicate (n) r) p
     (_, ms) <- (chain $ replicate (h - n) r) m
-    return $ or' ms
+    return $ or' (m:ms)
 applyQuantifier (QNoMoreThan n) r p = do
     (_, ms) <- (chain $ replicate n r) p
     return $ or' (p:ms)
@@ -133,7 +133,7 @@ main = do
         regexp2v r = do
             case parseOnly re r of
                 (Right r) -> do
-                    putStrLn "module re(input clk, input rst_n, input in, output match);" 
+                    putStrLn "module re(input clk, input rst_n, input logic [7:0] in, output match);" 
                     putStrLn $ verilog $ toHW' r (Lit 1 1)
                     putStrLn "endmodule"
                 _ -> do
