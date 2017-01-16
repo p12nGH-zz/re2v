@@ -16,6 +16,7 @@ data Re = Exact Char | Class Bool [ClassEntry] | Grp [[QRe]] | Any deriving (Sho
 data QRe = QRe Re Quantifier deriving (Show)
 data ClassEntry = ExactCE Char | RangeCE Char Char deriving (Show)
 data Quantifier = QNoMoreThan Int | QAtLeast Int | QExact Int Int deriving (Show)
+type SignalR = Signal ()
 
 captureGrp = Grp <$> ("(" *> (re1 ")|") <* ")")
 anyC = "." *> pure Any
@@ -63,7 +64,7 @@ classHWCondition c inv s = inverted inv where
         condh = BinaryOp (Cmp LessOrEqual) s $ charL charh
         condl = BinaryOp (Cmp GreaterOrEqual) s $ charL charl
 
-type ReHW = ReaderT Signal HW
+type ReHW = ReaderT SignalR (HW ())
 
 or' = MultyOp Or
 and' = MultyOp And
@@ -77,7 +78,7 @@ toHW Any = singleCharMatch $ \_ -> Lit 1 1 -- this case can be optimized
 toHW (Class i e) = singleCharMatch $ classHWCondition e i
 toHW (Grp m) = toHW' m
 
-toHW' :: [[QRe]] -> Signal -> ReHW Signal
+toHW' :: [[QRe]] -> SignalR -> ReHW SignalR
 toHW' rs p = do
     ms <- forM rs $ \s -> do
         let quantify (QRe r q) = applyQuantifier q (toHW r)
@@ -85,18 +86,18 @@ toHW' rs p = do
         return m
     return $ or' ms
 
-singleCharMatch :: (Signal -> Signal) -> Signal -> ReHW Signal
+singleCharMatch :: (SignalR -> SignalR) -> SignalR -> ReHW SignalR
 singleCharMatch match prev = do
     s <- ask
     let cond = and' [prev, match s]
     lift $ mkReg [(cond, Lit 1 1), (not' cond, Lit 0 1)]
 
 -- loop NFA
-loop :: (Signal -> ReHW Signal) -> Signal -> ReHW Signal
+loop :: (SignalR -> ReHW SignalR) -> SignalR -> ReHW SignalR
 loop r p = mfix $ \feedback -> r $ or' [feedback, p]
 
 -- chain sequential NFAs
-chain :: [(Signal -> ReHW Signal)] -> Signal -> ReHW (Signal, [Signal]) 
+chain :: [(SignalR -> ReHW SignalR)] -> SignalR -> ReHW (SignalR, [SignalR]) 
 chain [] p = pure (p, [])
 chain [r] p = do
     m <- r p
@@ -107,7 +108,7 @@ chain (r:rs) p = do
     return (m', m:ms)
 
 --
-applyQuantifier :: Quantifier -> (Signal -> ReHW Signal) -> Signal -> ReHW Signal
+applyQuantifier :: Quantifier -> (SignalR -> ReHW SignalR) -> SignalR -> ReHW SignalR
 applyQuantifier (QExact 1 1) r p = r p
 applyQuantifier (QAtLeast 1) r p = loop r p
 applyQuantifier (QAtLeast 0) r p = do
@@ -124,7 +125,7 @@ applyQuantifier (QNoMoreThan n) r p = do
     (_, ms) <- (chain $ replicate n r) p
     return $ or' (p:ms)
 
-verilog p = toVerilogHW $ do
+verilog' p = toVerilog $ do
     runReaderT p (Alias "in" 8) >>= sigalias "match"
 
 main :: IO ()
@@ -134,7 +135,7 @@ main = do
             case parseOnly re r of
                 (Right r) -> do
                     putStrLn "module re(input clk, input rst_n, input logic [7:0] in, output match);" 
-                    putStrLn $ verilog $ toHW' r (Lit 1 1)
+                    putStrLn $ verilog' $ toHW' r (Lit 1 1)
                     putStrLn "endmodule"
                 _ -> do
                     putStrLn "Cannot parse regular expression."
