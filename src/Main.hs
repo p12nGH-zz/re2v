@@ -125,23 +125,16 @@ applyQuantifier (QNoMoreThan n) r p = do
     (_, ms) <- (chain $ replicate n r) p
     return $ or' (p:ms)
 
-verilog' p = toVerilog $ do
-    runReaderT p (Alias "in" 8) >>= sigalias "match"
+re2v r = verilogM "re" $ do
+    i <- input "in" 8
+    m <- lift $ runReaderT (toHW' r (Lit 1 1)) i
+    output "match" m
 
 main :: IO ()
 main = do
-    let
-        regexp2v r = do
-            case parseOnly re r of
-                (Right r) -> do
-                    putStrLn "module re(input clk, input rst_n, input logic [7:0] in, output match);" 
-                    putStrLn $ verilog' $ toHW' r (Lit 1 1)
-                    putStrLn "endmodule"
-                _ -> do
-                    putStrLn "Cannot parse regular expression."
-                    exitFailure
-
     a <- getArgs
     case a of
-        (r:[]) -> regexp2v $ pack r
+        (r:[]) -> case parseOnly re $ pack r of
+            (Right r) -> putStrLn $ re2v r
+            _ -> putStrLn "Cannot parse regular expression." >> exitFailure
         _ -> putStrLn "Usage re2v <regular expression>. For example: re2v 'aa(re.)[^abc-9]|t'" >> exitFailure 
