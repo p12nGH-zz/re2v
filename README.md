@@ -2,7 +2,7 @@
 Regular expressions to SystemVerilog compiler.
 
 ## Overview
-A small utility that converts a PCRE-style regular expression into a SystemVerilog NFA. Regular expression is supplied as a command line 
+A small utility that converts a PCRE-style regular expression into a SystemVerilog NFA(nondeterministic finite automata). Regular expression is supplied as a command line 
 argument, SystemVerilog code is printed to standard output:
 ```shell
 re2v 'Hel{1,2}o'
